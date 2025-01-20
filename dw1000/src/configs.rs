@@ -26,6 +26,8 @@ pub struct TxConfig {
     pub sfd_sequence: SfdSequence,
     /// When true, a CRC will be appended to the message
     pub append_crc: bool,
+    /// Setting for how the transmission should be continued
+    pub continuation: TxContinuation,
 }
 
 impl Default for TxConfig {
@@ -38,8 +40,27 @@ impl Default for TxConfig {
             channel: Default::default(),
             sfd_sequence: Default::default(),
             append_crc: true,
+            continuation: TxContinuation::Ready,
         }
     }
+}
+
+/// Setting for how the transmission should be continued
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
+pub enum TxContinuation {
+    #[default]
+    /// After the transmission the radio should go back to ready
+    Ready,
+    /// After the transmission the radio should go to the receiving state
+    Rx {
+        /// Enable frame filtering. See [RxConfig::frame_filtering]
+        frame_filtering: bool,
+    },
+    /// After the transmission the radio should go to the double buffered receiving state
+    RxDoubleBuffered {
+        /// Enable frame filtering. See [RxConfig::frame_filtering]
+        frame_filtering: bool,
+    },
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -68,6 +89,32 @@ pub struct RxConfig {
     pub sfd_sequence: SfdSequence,
     /// When true, a CRC will be expected to be appended to the message
     pub append_crc: bool,
+}
+
+impl RxConfig {
+    /// Create an [RxConfig] by copying the properties from a [TxConfig] and adding missing properties
+    pub fn from_tx_config(tx_config: TxConfig, frame_filtering: bool) -> Self {
+        let TxConfig {
+            bitrate,
+            ranging_enable: _,
+            pulse_repetition_frequency,
+            preamble_length,
+            channel,
+            sfd_sequence,
+            append_crc,
+            continuation: _,
+        } = tx_config;
+
+        RxConfig {
+            bitrate,
+            frame_filtering,
+            pulse_repetition_frequency,
+            expected_preamble_length: preamble_length,
+            channel,
+            sfd_sequence,
+            append_crc,
+        }
+    }
 }
 
 impl Default for RxConfig {

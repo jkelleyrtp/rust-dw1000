@@ -80,6 +80,12 @@ where
     /// There are issues with frame filtering in double buffer mode.
     /// So it's not supported now.
     RxConfigFrameFilteringUnsupported,
+
+    /// The wrong continuation was called on the radio
+    WrongTxContinuation,
+
+    /// The transmission has not yet finished
+    TxNotFinishedyet,
 }
 
 impl<SPI> From<ll::Error<SPI>> for Error<SPI>
@@ -130,6 +136,12 @@ where
             Error::BadRssiCalculation => write!(f, "BadRssiCalculation"),
             Error::RxConfigFrameFilteringUnsupported => {
                 write!(f, "RxConfigFrameFilteringUnsupported")
+            }
+            Error::WrongTxContinuation => {
+                write!(f, "WrongTxContinuation")
+            }
+            Error::TxNotFinishedyet => {
+                write!(f, "TxNotFinishedyet")
             }
         }
     }
