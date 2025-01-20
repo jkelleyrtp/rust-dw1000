@@ -1,6 +1,6 @@
 use super::{AutoDoubleBufferReceiving, Receiving};
 use crate::{
-    configs::{BitRate, SfdSequence, TxContinuation},
+    configs::{AutoAck, BitRate, SfdSequence, TxContinuation},
     time::Instant,
     Error, Ready, RxConfig, Sending, SingleBufferReceiving, Sleeping, TxConfig, DW1000,
 };
@@ -234,16 +234,24 @@ where
                 // doesn't happen.
                 self.force_idle(false)?;
             }
-            TxContinuation::Rx { frame_filtering } => {
+            TxContinuation::Rx {
+                frame_filtering,
+                auto_ack,
+            } => {
                 self.config_receiving::<SingleBufferReceiving>(RxConfig::from_tx_config(
                     config,
                     frame_filtering,
+                    auto_ack,
                 ))?;
             }
-            TxContinuation::RxDoubleBuffered { frame_filtering } => {
+            TxContinuation::RxDoubleBuffered {
+                frame_filtering,
+                auto_ack,
+            } => {
                 self.config_receiving::<AutoDoubleBufferReceiving>(RxConfig::from_tx_config(
                     config,
                     frame_filtering,
+                    auto_ack,
                 ))?;
             }
         }
@@ -346,6 +354,8 @@ where
 
         // Todo: Power control (register 0x1E)
 
+        self.ll.ack_resp_t().modify(|_, w| w.w4r_tim(0))?;
+
         self.ll.sys_ctrl().modify(|_, w| {
             // Do we want to suppress crc generation?
             let w = w.sfcst(!config.append_crc as u8);
@@ -379,14 +389,6 @@ where
         &mut self,
         config: RxConfig,
     ) -> Result<(), Error<SPI>> {
-        // Really weird thing about double buffering I can't find anything about.
-        // When a message is received in double buffer mode that should be filtered out,
-        // the radio gives a really short fake interrupt.
-        // This messes up all the logic, so unless a solution can be found we simply don't support it.
-        if RECEIVING::DOUBLE_BUFFERED && config.frame_filtering {
-            return Err(Error::RxConfigFrameFilteringUnsupported);
-        }
-
         // For unknown reasons, the DW1000 gets stuck in RX mode without ever
         // receiving anything, after receiving one good frame. Reset the
         // receiver to make sure its in a valid state before attempting to
@@ -538,6 +540,16 @@ where
             // The RX Buffer Pointer of the host and the ic side don't point to the same one.
             // We need to switch over
             self.ll.sys_ctrl().modify(|_, w| w.hrbpt(1))?;
+        }
+
+        if let AutoAck::Enabled { turnaround_time } = config.auto_ack {
+            self.ll.sys_cfg().modify(|_, w| w.autoack(0b1))?;
+            self.ll
+                .ack_resp_t()
+                .modify(|_, w| w.ack_tim(turnaround_time))?;
+
+            // Reload the SFD sequence as described by 5.3.1.2
+            self.ll.sys_ctrl().modify(|_, w| w.txstrt(1).trxoff(1))?;
         }
 
         Ok(())

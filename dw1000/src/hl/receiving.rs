@@ -153,6 +153,24 @@ where
             // - LDEERR: Leading Edge Detection Processing Error
             // - RXPREJ: Receiver Preamble Rejection
 
+            if sys_status.txfrb() == 1
+                || sys_status.txprs() == 1
+                || sys_status.txphs() == 1
+                || sys_status.txfrs() == 1
+            {
+                // Old tx flags are still active. We don't need them anymore.
+                // This can happen from a tx continuation.
+                self.ll
+                    .sys_status()
+                    .write(|w| {
+                        w.txfrb(0b1) // Transmit Frame Begins
+                            .txprs(0b1) // Transmit Preamble Sent
+                            .txphs(0b1) // Transmit PHY Header Sent
+                            .txfrs(0b1) // Transmit Frame Sent
+                    })
+                    .map_err(|error| nb::Error::Other(Error::Spi(error.0)))?;
+            }
+
             // No errors detected. That must mean the frame is just not ready
             // yet.
             return Err(nb::Error::WouldBlock);

@@ -777,6 +777,10 @@ impl_register! {
         rx_state,    8, 12, u8; /// Current Receive State Machine value
         pmsc_state, 16, 23, u8; /// Current PMSC State Machine value
     }
+    0x1A, 0x00, 4, RW, ACK_RESP_T(ack_resp_t) { /// Acknowledgement time and response time
+        w4r_tim,    0,  19, u32; /// Wait-for-Response turn-around Time
+        ack_tim,   24,  31, u8; /// Auto-Acknowledgement turn-around Time
+    }
     0x1E, 0x00, 4, RW, TX_POWER(tx_power) { /// TX Power Control
         // The TX_POWER register has multiple sets of fields defined, depending
         // on the smart TX power control setting. I don't know how to model

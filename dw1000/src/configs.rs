@@ -55,11 +55,15 @@ pub enum TxContinuation {
     Rx {
         /// Enable frame filtering. See [RxConfig::frame_filtering]
         frame_filtering: bool,
+        /// Used as the [RxConfig::auto_ack] value
+        auto_ack: AutoAck,
     },
     /// After the transmission the radio should go to the double buffered receiving state
     RxDoubleBuffered {
         /// Enable frame filtering. See [RxConfig::frame_filtering]
         frame_filtering: bool,
+        /// Used as the [RxConfig::auto_ack] value
+        auto_ack: AutoAck,
     },
 }
 
@@ -89,11 +93,13 @@ pub struct RxConfig {
     pub sfd_sequence: SfdSequence,
     /// When true, a CRC will be expected to be appended to the message
     pub append_crc: bool,
+    /// When enabled, the radio itself will send acks to messages with the ack bit enabled.
+    pub auto_ack: AutoAck,
 }
 
 impl RxConfig {
     /// Create an [RxConfig] by copying the properties from a [TxConfig] and adding missing properties
-    pub fn from_tx_config(tx_config: TxConfig, frame_filtering: bool) -> Self {
+    pub const fn from_tx_config(tx_config: TxConfig, frame_filtering: bool, auto_ack: AutoAck) -> Self {
         let TxConfig {
             bitrate,
             ranging_enable: _,
@@ -113,6 +119,7 @@ impl RxConfig {
             channel,
             sfd_sequence,
             append_crc,
+            auto_ack,
         }
     }
 }
@@ -127,8 +134,30 @@ impl Default for RxConfig {
             channel: Default::default(),
             sfd_sequence: Default::default(),
             append_crc: true,
+            auto_ack: Default::default(),
         }
     }
+}
+
+/// The auto acknowledge behavior
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
+pub enum AutoAck {
+    #[default]
+    /// No automatic acks are sent
+    Disabled,
+    /// An automatic Ack will be sent if:
+    /// - Frame filtering is on
+    /// - The received frame passes through the filter
+    /// - The frame has the ack bit set
+    Enabled {
+        /// The turnaround time in number of symbols.
+        ///
+        /// Recommended minimal value:
+        /// - 110 kbps: 0
+        /// - 850 kbps: 2
+        /// - 6.8 Mbps: 3
+        turnaround_time: u8,
+    },
 }
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, TryFromPrimitive)]

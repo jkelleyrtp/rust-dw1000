@@ -133,7 +133,11 @@ where
     pub fn continue_receiving(
         mut self,
     ) -> Result<DW1000<SPI, SingleBufferReceiving>, (Self, Error<SPI>)> {
-        let TxContinuation::Rx { frame_filtering } = self.state.continuation else {
+        let TxContinuation::Rx {
+            frame_filtering,
+            auto_ack,
+        } = self.state.continuation
+        else {
             return Err((self, Error::WrongTxContinuation));
         };
 
@@ -157,7 +161,7 @@ where
             seq: self.seq,
             state: SingleBufferReceiving {
                 finished: false,
-                config: RxConfig::from_tx_config(self.state.config, frame_filtering),
+                config: RxConfig::from_tx_config(self.state.config, frame_filtering, auto_ack),
             },
         })
     }
@@ -169,12 +173,29 @@ where
     pub fn continue_receiving_double_buffered(
         mut self,
     ) -> Result<DW1000<SPI, AutoDoubleBufferReceiving>, (Self, Error<SPI>)> {
-        let TxContinuation::RxDoubleBuffered { frame_filtering } = self.state.continuation else {
+        let TxContinuation::RxDoubleBuffered {
+            frame_filtering,
+            auto_ack,
+        } = self.state.continuation
+        else {
             return Err((self, Error::WrongTxContinuation));
         };
 
         if !self.state.finished {
             return Err((self, Error::TxNotFinishedyet));
+        }
+
+        let status = match self.ll.sys_status().read() {
+            Ok(status) => status,
+            Err(e) => return Err((self, Error::Spi(e.0))),
+        };
+        if status.hsrbp() != status.icrbp() {
+            // The RX Buffer Pointer of the host and the ic side don't point to the same one.
+            // We need to switch over
+            match self.ll.sys_ctrl().modify(|_, w| w.hrbpt(1)) {
+                Ok(()) => {}
+                Err(e) => return Err((self, Error::Spi(e.0))),
+            };
         }
 
         match self.reset_flags() {
@@ -193,20 +214,18 @@ where
             seq: self.seq,
             state: AutoDoubleBufferReceiving {
                 finished: false,
-                config: RxConfig::from_tx_config(self.state.config, frame_filtering),
+                config: RxConfig::from_tx_config(self.state.config, frame_filtering, auto_ack),
             },
         })
     }
 
     fn reset_flags(&mut self) -> Result<(), Error<SPI>> {
-        self.ll.sys_status().write(
-            |w| {
-                w.txfrb(0b1) // Transmit Frame Begins
-                    .txprs(0b1) // Transmit Preamble Sent
-                    .txphs(0b1) // Transmit PHY Header Sent
-                    .txfrs(0b1)
-            }, // Transmit Frame Sent
-        )?;
+        self.ll.sys_status().write(|w| {
+            w.txfrb(0b1) // Transmit Frame Begins
+                .txprs(0b1) // Transmit Preamble Sent
+                .txphs(0b1) // Transmit PHY Header Sent
+                .txfrs(0b1) // Transmit Frame Sent
+        })?;
 
         Ok(())
     }
