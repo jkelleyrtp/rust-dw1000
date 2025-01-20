@@ -1,3 +1,7 @@
+### Unreleased
+
+- Add TX continuation (into RX state) for fast tx-rx turnaround time
+
 ### v0.6.0 (2021-12-14)
 
 - Add support for double-buffering RX ([#134])
