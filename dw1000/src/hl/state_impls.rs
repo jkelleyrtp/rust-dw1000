@@ -1,4 +1,4 @@
-use crate::{time::Duration, RxConfig};
+use crate::{configs::TxContinuation, time::Duration, RxConfig, TxConfig};
 
 /// Indicates that the `DW1000` instance is not initialized yet
 #[derive(Debug)]
@@ -12,6 +12,8 @@ pub struct Ready;
 #[derive(Debug)]
 pub struct Sending {
     pub(super) finished: bool,
+    pub(super) continuation: TxContinuation,
+    pub(super) config: TxConfig,
 }
 
 /// Indicates that the `DW1000` instance is currently receiving in single buffer mode (default)

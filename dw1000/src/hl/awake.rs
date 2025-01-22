@@ -50,6 +50,12 @@ where
         Ok(Instant::new(sys_time).unwrap())
     }
 
+    /// Set the value of the pending bit used by the auto acks
+    pub fn set_pending_bit(&mut self, value: bool) -> Result<(), Error<SPI>> {
+        self.ll.sys_cfg().modify(|_, w| w.aackpend(value as u8))?;
+        Ok(())
+    }
+
     /// Provides direct access to the register-level API
     ///
     /// Be aware that by using the register-level API, you can invalidate

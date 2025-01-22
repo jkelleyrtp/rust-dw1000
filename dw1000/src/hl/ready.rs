@@ -1,7 +1,8 @@
-use super::AutoDoubleBufferReceiving;
+use super::{AutoDoubleBufferReceiving, Receiving};
 use crate::{
-    configs::SfdSequence, time::Instant, Error, Ready, RxConfig, Sending, SingleBufferReceiving,
-    Sleeping, TxConfig, DW1000,
+    configs::{AutoAck, BitRate, SfdSequence, TxContinuation},
+    time::Instant,
+    Error, Ready, RxConfig, Sending, SingleBufferReceiving, Sleeping, TxConfig, DW1000,
 };
 use byte::BytesExt as _;
 use core::num::Wrapping;
@@ -216,20 +217,44 @@ where
         send_time: SendTime,
         config: TxConfig,
     ) -> Result<DW1000<SPI, Sending>, Error<SPI>> {
-        // Clear event counters
-        self.ll.evc_ctrl().write(|w| w.evc_clr(0b1))?;
-        while self.ll.evc_ctrl().read()?.evc_clr() == 0b1 {}
+        match config.continuation {
+            TxContinuation::Ready => {
+                // Clear event counters
+                self.ll.evc_ctrl().write(|w| w.evc_clr(0b1))?;
+                while self.ll.evc_ctrl().read()?.evc_clr() == 0b1 {}
 
-        // (Re-)Enable event counters
-        self.ll.evc_ctrl().write(|w| w.evc_en(0b1))?;
-        while self.ll.evc_ctrl().read()?.evc_en() == 0b1 {}
+                // (Re-)Enable event counters
+                self.ll.evc_ctrl().write(|w| w.evc_en(0b1))?;
+                while self.ll.evc_ctrl().read()?.evc_en() == 0b1 {}
 
-        // Sometimes, for unknown reasons, the DW1000 gets stuck in RX mode.
-        // Starting the transmitter won't get it to enter TX mode, which means
-        // all subsequent send operations will fail. Let's disable the
-        // transceiver and force the chip into IDLE mode to make sure that
-        // doesn't happen.
-        self.force_idle(false)?;
+                // Sometimes, for unknown reasons, the DW1000 gets stuck in RX mode.
+                // Starting the transmitter won't get it to enter TX mode, which means
+                // all subsequent send operations will fail. Let's disable the
+                // transceiver and force the chip into IDLE mode to make sure that
+                // doesn't happen.
+                self.force_idle(false)?;
+            }
+            TxContinuation::Rx {
+                frame_filtering,
+                auto_ack,
+            } => {
+                self.config_receiving::<SingleBufferReceiving>(RxConfig::from_tx_config(
+                    config,
+                    frame_filtering,
+                    auto_ack,
+                ))?;
+            }
+            TxContinuation::RxDoubleBuffered {
+                frame_filtering,
+                auto_ack,
+            } => {
+                self.config_receiving::<AutoDoubleBufferReceiving>(RxConfig::from_tx_config(
+                    config,
+                    frame_filtering,
+                    auto_ack,
+                ))?;
+            }
+        }
 
         match send_time {
             SendTime::Delayed(time) => {
@@ -329,6 +354,8 @@ where
 
         // Todo: Power control (register 0x1E)
 
+        self.ll.ack_resp_t().modify(|_, w| w.w4r_tim(0))?;
+
         self.ll.sys_ctrl().modify(|_, w| {
             // Do we want to suppress crc generation?
             let w = w.sfcst(!config.append_crc as u8);
@@ -341,6 +368,7 @@ where
                     w
                 }
                 .txstrt(0b1)
+                .wait4resp(!matches!(config.continuation, TxContinuation::Ready) as u8)
             } else {
                 w
             }
@@ -349,8 +377,182 @@ where
         Ok(DW1000 {
             ll: self.ll,
             seq: self.seq,
-            state: Sending { finished: false },
+            state: Sending {
+                finished: false,
+                continuation: config.continuation,
+                config,
+            },
         })
+    }
+
+    pub(super) fn config_receiving<RECEIVING: Receiving>(
+        &mut self,
+        config: RxConfig,
+    ) -> Result<(), Error<SPI>> {
+        // For unknown reasons, the DW1000 gets stuck in RX mode without ever
+        // receiving anything, after receiving one good frame. Reset the
+        // receiver to make sure its in a valid state before attempting to
+        // receive anything.
+        self.ll.pmsc_ctrl0().modify(
+            |_, w| w.softreset(0b1110), // reset receiver
+        )?;
+        self.ll.pmsc_ctrl0().modify(
+            |_, w| w.softreset(0b1111), // clear reset
+        )?;
+
+        // We're already resetting the receiver in the previous step, and that's
+        // good enough to make my example program that's both sending and
+        // receiving work very reliably over many hours (that's not to say it
+        // becomes unreliable after those hours, that's just when my test
+        // stopped). However, I've seen problems with an example program that
+        // only received, never sent, data. That got itself into some weird
+        // state where it couldn't receive anymore.
+        // I suspect that's because that example didn't have the following line
+        // of code, while the send/receive example had that line of code, being
+        // called from `send`.
+        // While I haven't, as of this writing, run any hours-long tests to
+        // confirm this does indeed fix the receive-only example, it seems
+        // (based on my eyeball-only measurements) that the RX/TX example is
+        // dropping fewer frames now.
+        self.force_idle(false)?;
+
+        self.ll.sys_cfg().modify(|_, w| {
+            w.ffen(config.frame_filtering as u8) // enable or disable frame filtering
+                .ffab(0b1) // receive beacon frames
+                .ffad(0b1) // receive data frames
+                .ffaa(0b1) // receive acknowledgement frames
+                .ffam(0b1) // receive MAC command frames
+                // Set the double buffering and auto re-enable
+                .dis_drxb(!RECEIVING::DOUBLE_BUFFERED as u8)
+                .rxautr(RECEIVING::AUTO_RX_REENABLE as u8)
+                // Set whether the receiver should look for 110kbps or 850/6800kbps messages
+                .rxm110k((config.bitrate == BitRate::Kbps110) as u8)
+        })?;
+
+        // Set PLLLDT bit in EC_CTRL. According to the documentation of the
+        // CLKPLL_LL bit in SYS_STATUS, this bit needs to be set to ensure the
+        // reliable operation of the CLKPLL_LL bit. Since I've seen that bit
+        // being set, I want to make sure I'm not just seeing crap.
+        self.ll.ec_ctrl().modify(|_, w| w.pllldt(0b1))?;
+
+        // Now that PLLLDT is set, clear all bits in SYS_STATUS that depend on
+        // it for reliable operation. After that is done, these bits should work
+        // reliably.
+        self.ll
+            .sys_status()
+            .write(|w| w.cplock(0b1).clkpll_ll(0b1))?;
+
+        // Apply the config
+        self.ll.chan_ctrl().modify(|_, w| {
+            w.tx_chan(config.channel as u8)
+                .rx_chan(config.channel as u8)
+                .dwsfd(
+                    (config.sfd_sequence == SfdSequence::Decawave
+                        || config.sfd_sequence == SfdSequence::DecawaveAlt)
+                        as u8,
+                )
+                .rxprf(config.pulse_repetition_frequency as u8)
+                .tnssfd(
+                    (config.sfd_sequence == SfdSequence::User
+                        || config.sfd_sequence == SfdSequence::DecawaveAlt)
+                        as u8,
+                )
+                .rnssfd(
+                    (config.sfd_sequence == SfdSequence::User
+                        || config.sfd_sequence == SfdSequence::DecawaveAlt)
+                        as u8,
+                )
+                .tx_pcode(
+                    config
+                        .channel
+                        .get_recommended_preamble_code(config.pulse_repetition_frequency),
+                )
+                .rx_pcode(
+                    config
+                        .channel
+                        .get_recommended_preamble_code(config.pulse_repetition_frequency),
+                )
+        })?;
+
+        match config.sfd_sequence {
+            SfdSequence::IEEE => {} // IEEE has predefined sfd lengths and the register has no effect.
+            SfdSequence::Decawave => self.ll.sfd_length().write(|w| w.value(8))?, // This isn't entirely necessary as the Decawave8 settings in chan_ctrl already force it to 8
+            SfdSequence::DecawaveAlt => self.ll.sfd_length().write(|w| w.value(16))?, // Set to 16
+            SfdSequence::User => {} // Users are responsible for setting the lengths themselves
+        }
+
+        // Set general tuning
+        self.ll.drx_tune0b().write(|w| {
+            w.value(
+                config
+                    .bitrate
+                    .get_recommended_drx_tune0b(config.sfd_sequence),
+            )
+        })?;
+        self.ll.drx_tune1a().write(|w| {
+            w.value(
+                config
+                    .pulse_repetition_frequency
+                    .get_recommended_drx_tune1a(),
+            )
+        })?;
+        let drx_tune1b = config
+            .expected_preamble_length
+            .get_recommended_drx_tune1b(config.bitrate)?;
+        self.ll.drx_tune1b().write(|w| w.value(drx_tune1b))?;
+        let drx_tune2 = config
+            .pulse_repetition_frequency
+            .get_recommended_drx_tune2(
+                config.expected_preamble_length.get_recommended_pac_size(),
+            )?;
+        self.ll.drx_tune2().write(|w| w.value(drx_tune2))?;
+        self.ll
+            .drx_tune4h()
+            .write(|w| w.value(config.expected_preamble_length.get_recommended_dxr_tune4h()))?;
+
+        // Set channel tuning
+        self.ll
+            .rf_rxctrlh()
+            .write(|w| w.value(config.channel.get_recommended_rf_rxctrlh()))?;
+        self.ll
+            .fs_pllcfg()
+            .write(|w| w.value(config.channel.get_recommended_fs_pllcfg()))?;
+        self.ll
+            .fs_plltune()
+            .write(|w| w.value(config.channel.get_recommended_fs_plltune()))?;
+
+        // Set the LDE registers
+        self.ll
+            .lde_cfg2()
+            .write(|w| w.value(config.pulse_repetition_frequency.get_recommended_lde_cfg2()))?;
+        self.ll.lde_repc().write(|w| {
+            w.value(
+                config.channel.get_recommended_lde_repc_value(
+                    config.pulse_repetition_frequency,
+                    config.bitrate,
+                ),
+            )
+        })?;
+
+        // Check if the rx buffer pointer is correct
+        let status = self.ll.sys_status().read()?;
+        if status.hsrbp() != status.icrbp() {
+            // The RX Buffer Pointer of the host and the ic side don't point to the same one.
+            // We need to switch over
+            self.ll.sys_ctrl().modify(|_, w| w.hrbpt(1))?;
+        }
+
+        if let AutoAck::Enabled { turnaround_time } = config.auto_ack {
+            self.ll.sys_cfg().modify(|_, w| w.autoack(0b1))?;
+            self.ll
+                .ack_resp_t()
+                .modify(|_, w| w.ack_tim(turnaround_time))?;
+
+            // Reload the SFD sequence as described by 5.3.1.2
+            self.ll.sys_ctrl().modify(|_, w| w.txstrt(1).trxoff(1))?;
+        }
+
+        Ok(())
     }
 
     /// Attempt to receive a single IEEE 802.15.4 MAC frame
@@ -364,9 +566,11 @@ where
     /// that are transmitted. The default works with the TxConfig's default and
     /// is a sane starting point.
     pub fn receive(
-        self,
+        mut self,
         config: RxConfig,
     ) -> Result<DW1000<SPI, SingleBufferReceiving>, Error<SPI>> {
+        self.config_receiving::<SingleBufferReceiving>(config)?;
+
         let mut rx_radio = DW1000 {
             ll: self.ll,
             seq: self.seq,
@@ -377,7 +581,7 @@ where
         };
 
         // Start rx'ing
-        rx_radio.start_receiving(config)?;
+        rx_radio.start_receiving()?;
 
         // Return the double buffer state
         Ok(rx_radio)
@@ -398,9 +602,11 @@ where
     /// that are transmitted. The default works with the TxConfig's default and
     /// is a sane starting point.
     pub fn receive_auto_double_buffered(
-        self,
+        mut self,
         config: RxConfig,
     ) -> Result<DW1000<SPI, AutoDoubleBufferReceiving>, Error<SPI>> {
+        self.config_receiving::<AutoDoubleBufferReceiving>(config)?;
+
         let mut rx_radio = DW1000 {
             ll: self.ll,
             seq: self.seq,
@@ -411,7 +617,7 @@ where
         };
 
         // Start rx'ing
-        rx_radio.start_receiving(config)?;
+        rx_radio.start_receiving()?;
 
         // Return the double buffer state
         Ok(rx_radio)

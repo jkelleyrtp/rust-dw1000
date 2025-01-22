@@ -1,3 +1,9 @@
+### Unreleased
+
+- Add TX continuation (into RX state) for fast tx-rx turnaround time
+- Add auto ack functionality
+- Add support for 'raw' messages (aka it's up to the user to encode them as valid ieee 802.15.4 frames)
+
 ### v0.6.0 (2021-12-14)
 
 - Add support for double-buffering RX ([#134])

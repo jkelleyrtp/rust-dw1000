@@ -1,6 +1,8 @@
-use crate::{time::Instant, Error, Ready, Sending, DW1000};
+use crate::{configs::TxContinuation, time::Instant, Error, Ready, RxConfig, Sending, DW1000};
 use embedded_hal::spi::SpiDevice;
 use nb;
+
+use super::{AutoDoubleBufferReceiving, SingleBufferReceiving};
 
 impl<SPI> DW1000<SPI, Sending>
 where
@@ -77,12 +79,27 @@ where
         Ok(tx_timestamp)
     }
 
-    /// Finishes sending and returns to the `Ready` state
+    /// Finishes sending and returns to the `Ready` state.
+    ///
+    /// If the used tx continuation was not set to ready, this function returns an error.
     ///
     /// If the send operation has finished, as indicated by `wait`, this is a
     /// no-op. If the send operation is still ongoing, it will be aborted.
     #[allow(clippy::type_complexity)]
-    pub fn finish_sending(mut self) -> Result<DW1000<SPI, Ready>, (Self, Error<SPI>)> {
+    pub fn finish_sending(self) -> Result<DW1000<SPI, Ready>, (Self, Error<SPI>)> {
+        if self.state.continuation != TxContinuation::Ready {
+            return Err((self, Error::WrongTxContinuation));
+        }
+
+        self.abort_sending()
+    }
+
+    /// Finishes sending and returns to the `Ready` state (no matter the tx continuation that was configured)
+    ///
+    /// If the send operation has finished, as indicated by `wait`, this is a
+    /// no-op. If the send operation is still ongoing, it will be aborted.
+    #[allow(clippy::type_complexity)]
+    pub fn abort_sending(mut self) -> Result<DW1000<SPI, Ready>, (Self, Error<SPI>)> {
         if !self.state.finished {
             // Can't use `map_err` and `?` here, as the compiler will complain
             // about `self` moving into the closure.
@@ -109,15 +126,106 @@ where
         })
     }
 
+    /// Continue on in the receiving state.
+    ///
+    /// This can only be called when the tx config specified this should be the continuation.
+    /// This function will not abort the send operation, so make sure to call [Self::wait_transmit] first.
+    pub fn continue_receiving(
+        mut self,
+    ) -> Result<DW1000<SPI, SingleBufferReceiving>, (Self, Error<SPI>)> {
+        let TxContinuation::Rx {
+            frame_filtering,
+            auto_ack,
+        } = self.state.continuation
+        else {
+            return Err((self, Error::WrongTxContinuation));
+        };
+
+        if !self.state.finished {
+            return Err((self, Error::TxNotFinishedyet));
+        }
+
+        match self.reset_flags() {
+            Ok(()) => (),
+            Err(error) => return Err((self, error)),
+        }
+
+        // Turn off the external transmit synchronization
+        match self.ll.ec_ctrl().modify(|_, w| w.ostsm(0)) {
+            Ok(_) => {}
+            Err(e) => return Err((self, Error::Spi(e.0))),
+        }
+
+        Ok(DW1000 {
+            ll: self.ll,
+            seq: self.seq,
+            state: SingleBufferReceiving {
+                finished: false,
+                config: RxConfig::from_tx_config(self.state.config, frame_filtering, auto_ack),
+            },
+        })
+    }
+
+    /// Continue on in the double buffered receiving state.
+    ///
+    /// This can only be called when the tx config specified this should be the continuation.
+    /// This function will not abort the send operation, so make sure to call [Self::wait_transmit] first.
+    pub fn continue_receiving_double_buffered(
+        mut self,
+    ) -> Result<DW1000<SPI, AutoDoubleBufferReceiving>, (Self, Error<SPI>)> {
+        let TxContinuation::RxDoubleBuffered {
+            frame_filtering,
+            auto_ack,
+        } = self.state.continuation
+        else {
+            return Err((self, Error::WrongTxContinuation));
+        };
+
+        if !self.state.finished {
+            return Err((self, Error::TxNotFinishedyet));
+        }
+
+        let status = match self.ll.sys_status().read() {
+            Ok(status) => status,
+            Err(e) => return Err((self, Error::Spi(e.0))),
+        };
+        if status.hsrbp() != status.icrbp() {
+            // The RX Buffer Pointer of the host and the ic side don't point to the same one.
+            // We need to switch over
+            match self.ll.sys_ctrl().modify(|_, w| w.hrbpt(1)) {
+                Ok(()) => {}
+                Err(e) => return Err((self, Error::Spi(e.0))),
+            };
+        }
+
+        match self.reset_flags() {
+            Ok(()) => (),
+            Err(error) => return Err((self, error)),
+        }
+
+        // Turn off the external transmit synchronization
+        match self.ll.ec_ctrl().modify(|_, w| w.ostsm(0)) {
+            Ok(_) => {}
+            Err(e) => return Err((self, Error::Spi(e.0))),
+        }
+
+        Ok(DW1000 {
+            ll: self.ll,
+            seq: self.seq,
+            state: AutoDoubleBufferReceiving {
+                finished: false,
+                config: RxConfig::from_tx_config(self.state.config, frame_filtering, auto_ack),
+            },
+        })
+    }
+
     fn reset_flags(&mut self) -> Result<(), Error<SPI>> {
-        self.ll.sys_status().write(
-            |w| {
-                w.txfrb(0b1) // Transmit Frame Begins
-                    .txprs(0b1) // Transmit Preamble Sent
-                    .txphs(0b1) // Transmit PHY Header Sent
-                    .txfrs(0b1)
-            }, // Transmit Frame Sent
-        )?;
+        self.ll.sys_status().write(|w| {
+            w.txfrb(0b1) // Transmit Frame Begins
+                .txprs(0b1) // Transmit Preamble Sent
+                .txphs(0b1) // Transmit PHY Header Sent
+                .txfrs(0b1) // Transmit Frame Sent
+        })?;
 
         Ok(())
     }
