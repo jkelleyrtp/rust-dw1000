@@ -25,7 +25,7 @@ use embedded_hal::spi::{Operation, SpiDevice};
 ///
 /// [hl::DW1000]: ../hl/struct.DW1000.html
 pub struct DW1000<SPI> {
-    spi: SPI,
+    spi: Option<SPI>,
 }
 
 impl<SPI: SpiDevice> DW1000<SPI> {
@@ -34,7 +34,7 @@ impl<SPI: SpiDevice> DW1000<SPI> {
     /// Requires the SPI peripheral and the chip select pin that are connected
     /// to the DW1000.
     pub fn new(spi: SPI) -> Self {
-        DW1000 { spi }
+        DW1000 { spi: Some(spi) }
     }
 
     /// Read a whole block of data
@@ -55,7 +55,7 @@ impl<SPI: SpiDevice> DW1000<SPI> {
         buffer[2] = ((start_sub_id & 0x7f80) >> 7) as u8;
 
         // Read the data
-        self.spi.transfer_in_place(buffer).map_err(Error)?;
+        self.spi().transfer_in_place(buffer).map_err(Error)?;
 
         Ok(&mut buffer[3..])
     }
@@ -84,21 +84,19 @@ impl<SPI: SpiDevice> DW1000<SPI> {
     where
         F: FnOnce(SPI) -> SPI,
     {
-        // This is unsafe because we create a zeroed spi.
-        // Its safety is guaranteed, though, because the zeroed spi is never used.
-        unsafe {
-            // Create a zeroed spi.
-            let spi = core::mem::zeroed();
-            // Get the spi in the struct.
-            let spi = core::mem::replace(&mut self.spi, spi);
-            // Give the spi to the closure and put the result back into the struct.
-            self.spi = f(spi);
-        }
+        // Get the spi in the struct.
+        let spi = self.spi.take().expect("spi should always be set");
+        // Give the spi to the closure and put the result back into the struct.
+        self.spi = Some(f(spi));
+    }
+
+    fn spi(&mut self) -> &mut SPI {
+        self.spi.as_mut().expect("spi should always be set")
     }
 
     /// Deasserts CS, waits the given amount of µs, and reasserts CS
     pub(crate) fn wake_up(&mut self, wait_time_us: u32) -> Result<(), Error<SPI>> {
-        self.spi
+        self.spi()
             .transaction(&mut [Operation::DelayNs(wait_time_us * 1000)])
             .map_err(Error)
     }
@@ -124,7 +122,7 @@ where
 
         init_header::<R>(false, buffer);
 
-        self.0.spi.transfer_in_place(buffer).map_err(Error)?;
+        self.0.spi().transfer_in_place(buffer).map_err(Error)?;
 
         Ok(r)
     }
@@ -141,7 +139,7 @@ where
         let buffer = R::buffer(&mut w);
         init_header::<R>(true, buffer);
 
-        self.0.spi.write(buffer).map_err(Error)?;
+        self.0.spi().write(buffer).map_err(Error)?;
 
         Ok(())
     }
@@ -162,7 +160,7 @@ where
         let buffer = <R as Writable>::buffer(&mut w);
         init_header::<R>(true, buffer);
 
-        self.0.spi.write(buffer).map_err(Error)?;
+        self.0.spi().write(buffer).map_err(Error)?;
 
         Ok(())
     }
